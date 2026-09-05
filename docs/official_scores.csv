@@ -1,0 +1,5 @@
+model_stage,official_rmse,selected,source
+GPR+FFT+SG1+MSC+coal calibration,174.41325,false,competition platform
+C_mad3 robust multikernel calibration,143.81585,false,competition platform
+multiview residual consensus candidate,141.41519,false,competition platform
+multiscale multikernel GPR with reliability-gated residual correction,140.71316,true,competition platform

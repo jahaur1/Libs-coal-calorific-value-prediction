@@ -1,0 +1,39 @@
+# Competition data and data-derived caches
+data/*
+!data/README.md
+training_artifacts/
+
+# Local experiments and diagnostic targets
+experiments/
+analysis/
+external/
+*near_best*
+*near-best*
+*est_true*
+*_violations/
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+
+# Secrets and local configuration
+.env
+.env.*
+*.key
+*.pem
+
+# Editors and operating systems
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Logs and temporary outputs
+*.log
+*.tmp
+~$*
