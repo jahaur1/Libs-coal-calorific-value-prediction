@@ -105,6 +105,9 @@
 ├─ data/README.md               # 训练数据目录约定
 ├─ submit.csv                   # 最优成绩对应的两列预测结果
 ├─ CHECKSUMS.sha256             # 核心文件完整性校验
+├─ LICENSE.md                   # PolyForm 非商业许可正文
+├─ COMMERCIAL_LICENSE.md        # 付费商业授权条件
+├─ NOTICE.md                    # 版权人和授权联系方式
 ├─ requirements.txt             # 兼容依赖范围
 └─ requirements-lock.txt        # 成功复跑的精确依赖版本
 ```
@@ -131,3 +134,12 @@ pandas 1.5.3
 SciPy 1.10.1
 scikit-learn 1.2.2
 ```
+
+## 许可协议
+
+本项目采用双重许可：
+
+- **非商业使用**：遵循 [PolyForm Noncommercial License 1.0.0](LICENSE.md)。
+- **商业使用**：必须事先取得版权人的书面许可、签署独立商业许可协议并支付约定费用，具体条件见 [COMMERCIAL_LICENSE.md](COMMERCIAL_LICENSE.md)。
+
+在书面商业许可协议签署且约定费用支付完成前，不授予任何商业使用权。版权人署名和商业授权联系邮箱暂时留空，预留位置见 [NOTICE.md](NOTICE.md)。
