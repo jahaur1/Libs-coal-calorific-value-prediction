@@ -1,11 +1,6 @@
-"""Complete fixed training pipeline from the competition raw files."""
+"""Reusable data loading, spectroscopy, GPR, and calibration primitives."""
 from __future__ import annotations
 
-import argparse
-import hashlib
-import json
-import re
-import sys
 import time
 import warnings
 from functools import lru_cache
@@ -28,33 +23,28 @@ from sklearn.gaussian_process.kernels import (
 )
 from sklearn.model_selection import GroupKFold
 from sklearn.preprocessing import StandardScaler
-from threadpoolctl import threadpool_limits
-
-from predict import PREDICTION_COLUMN, predict_from_arrays
 
 warnings.filterwarnings("ignore")
 
 
-# 以下常量是最终参赛方案的全局算法配置，对所有训练和测试批次统一生效。
-# 它们控制随机复现、光谱预处理、模型容量和多尺度表示，不包含针对某个测试样本的修补值。
-SEED = 0  # 固定波长掩码扰动；GPR 本身没有额外的随机采样步骤。
-FFT_CUTOFF = 0.02  # 置零最低频的 2%，用于抑制缓慢变化的光谱背景。
-VIP_THRESHOLD = 1.0  # 保留 PLS-VIP 不低于 1 的波长通道。
-VIP_COMPONENTS = 20  # 计算 VIP 时的最大 PLS 分量数，实际值受样本数限制。
-GPR_RESTARTS = 2  # GPR 核超参数优化的额外重启次数。
-MASK_AGGREGATES = 5  # 全训练拟合时对 VIP 掩码做轻微扰动并平均，降低选择方差。
-RAW_POINTS = 512  # LVSE/Haar 几何分支使用的统一波长采样点数。
-
-# 每个二元组依次表示 Savitzky-Golay 导数窗口和局部均值半径。
-FIXED_PAIRS = ((13, 6), (11, 5), (15, 7))
-# 三个尺度分支的历史最终融合权重，和为 1。
-PAIR_WEIGHTS = np.asarray(
-    (0.34725658675111365, 0.4623235887661649, 0.19041982448272152),
-    dtype=float,
-)
+# 以下常量是预先声明的算法与复现设置，不是最终预测值或测试目标信息。
+# 固定随机过程，使VIP扰动集成和GPR训练在相同运行环境中可复现。
+SEED = 0
+# FFT高通滤波移除最低2%的频率分量，用于削弱缓慢变化的光谱基线。
+FFT_CUTOFF = 0.02
+# VIP=1是PLS变量重要性筛选的标准阈值；具体保留通道仍由训练标签决定。
+VIP_THRESHOLD = 1.0
+# PLS最多使用20个分量计算VIP，实际分量数还受训练样本数限制。
+VIP_COMPONENTS = 20
+# 每个GPR核执行2次额外优化器重启，以降低局部最优风险。
+GPR_RESTARTS = 2
+# 全训练拟合时对VIP掩码做5次确定性扰动并平均，降低单次通道选择方差。
+MASK_AGGREGATES = 5
+# 几何残差分支将原始波长轴统一重采样到512点。
+RAW_POINTS = 512
+# 预先声明的基础核族；核超参数仍由每次GPR训练在训练数据上优化。
 KERNEL_NAMES = ("rbf", "matern15", "matern25", "rational_quadratic", "dot_product")
-# 与 KERNEL_NAMES 一一对应的固定核融合权重，和为 1。
-KERNEL_WEIGHTS = np.asarray((0.068, 0.534, 0.254, 0.068, 0.076), dtype=float)
+# 竞赛训练标签工作簿的固定列顺序，用于把无标题字段映射为语义列名。
 LABEL_COLUMNS = (
     "batch_day",
     "total_moisture",
@@ -64,18 +54,14 @@ LABEL_COLUMNS = (
     "hydrogen",
     "sulfur",
 )
-# 每项依次为中心谱带、左侧连续谱参考区和右侧连续谱参考区。
-# 这些波段用于构建局部连续谱残差与 Haar 多尺度特征。
+# 基于光谱领域知识预先声明的四个发射波段：
+# 每项依次为中心区间、左连续谱区间和右连续谱区间，不使用测试目标确定。
 EMISSION_BANDS = (
     (306.0, 310.0, 302.0, 305.0, 311.0, 314.0),
     (484.0, 488.0, 480.0, 483.0, 489.0, 492.0),
     (653.0, 660.0, 648.0, 652.0, 661.0, 665.0),
     (774.0, 781.0, 768.0, 773.0, 782.0, 788.0),
 )
-
-
-def file_sha256(path: Path) -> str:
-    return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
 def read_label_file(path: Path) -> pd.DataFrame:
@@ -113,8 +99,39 @@ def collect_batches(root: Path, split: str) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def build_batch_index(project_root: Path) -> pd.DataFrame:
-    data_root = project_root / "data"
+def resolve_competition_data_root(xfdata_root: Path) -> Path:
+    """Locate the organizer-provided dataset without relying on machine paths."""
+    root = xfdata_root.resolve()
+    required = ("训练集", "训练集标签", "测试集")
+    if all((root / name).is_dir() for name in required):
+        return root
+    candidates = sorted(
+        {
+            path.parent
+            for path in root.rglob("训练集")
+            if path.is_dir()
+            and all((path.parent / name).is_dir() for name in required)
+        }
+    )
+    if len(candidates) != 1:
+        raise FileNotFoundError(
+            f"Expected one dataset containing {required} under {root}; found {len(candidates)}"
+        )
+    return candidates[0]
+
+
+def submission_template_path(xfdata_root: Path) -> Path:
+    data_root = resolve_competition_data_root(xfdata_root)
+    candidates = sorted(data_root.glob("submit_sample/**/submit.csv"))
+    if len(candidates) != 1:
+        raise FileNotFoundError(
+            f"Expected one submit_sample/**/submit.csv under {data_root}; found {len(candidates)}"
+        )
+    return candidates[0]
+
+
+def build_batch_index(xfdata_root: Path) -> pd.DataFrame:
+    data_root = resolve_competition_data_root(xfdata_root)
     train = collect_batches(data_root / "训练集", "train")
     label_files = sorted((data_root / "训练集标签").glob("*.xlsx"))
     if not label_files:
@@ -133,6 +150,7 @@ def build_batch_index(project_root: Path) -> pd.DataFrame:
 
 @lru_cache(maxsize=None)
 def read_spectrum(path: str) -> tuple[np.ndarray, np.ndarray]:
+    # 竞赛光谱CSV前4行为仪器元数据，后续前两列分别是波长和强度。
     frame = pd.read_csv(path, skiprows=4, usecols=[0, 1])
     return (
         frame.iloc[:, 0].to_numpy(np.float32),
@@ -155,9 +173,10 @@ def load_batch_mean(batch_dir: str) -> tuple[np.ndarray, np.ndarray]:
     return wavelength, np.vstack([item[1] for item in loaded]).mean(axis=0)
 
 
-def prepare_data(project_root: Path, artifact_dir: Path) -> Path:
+def load_competition_arrays(xfdata_root: Path) -> dict[str, np.ndarray]:
+    """Read the organizer data and return deterministic batch-mean arrays."""
     started = time.perf_counter()
-    index = build_batch_index(project_root)
+    index = build_batch_index(xfdata_root)
     means: list[np.ndarray] = []
     reference_wavelengths: np.ndarray | None = None
     for row in index.itertuples(index=False):
@@ -174,23 +193,31 @@ def prepare_data(project_root: Path, artifact_dir: Path) -> Path:
     spectra = np.asarray(means, dtype=np.float32)
     train_mask = index["split"].eq("train").to_numpy()
     test_mask = index["split"].eq("test").to_numpy()
-    path = artifact_dir / "prepared_data.npz"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    np.savez_compressed(
-        path,
-        wavelengths=reference_wavelengths,
-        x_train=spectra[train_mask],
-        x_test=spectra[test_mask],
-        y=index.loc[train_mask, "target_q"].to_numpy(np.float32),
-        train_ids=np.asarray(index.loc[train_mask, "batch_name"].astype(str), dtype=str),
-        test_ids=np.asarray(index.loc[test_mask, "batch_name"].astype(str), dtype=str),
-        coal_train=np.asarray(index.loc[train_mask, "coal_type"].astype(str), dtype=str),
-        coal_test=np.asarray(index.loc[test_mask, "coal_type"].astype(str), dtype=str),
-    )
+    arrays = {
+        "wavelengths": reference_wavelengths,
+        "x_train": spectra[train_mask],
+        "x_test": spectra[test_mask],
+        "y": index.loc[train_mask, "target_q"].to_numpy(np.float32),
+        "train_ids": np.asarray(index.loc[train_mask, "batch_name"].astype(str), dtype=str),
+        "test_ids": np.asarray(index.loc[test_mask, "batch_name"].astype(str), dtype=str),
+        "coal_train": np.asarray(index.loc[train_mask, "coal_type"].astype(str), dtype=str),
+        "coal_test": np.asarray(index.loc[test_mask, "coal_type"].astype(str), dtype=str),
+    }
     print(
         f"[data] train={int(train_mask.sum())}, test={int(test_mask.sum())}, "
         f"channels={spectra.shape[1]}, seconds={time.perf_counter() - started:.1f}",
         flush=True,
+    )
+    return arrays
+
+
+def prepare_data(xfdata_root: Path, artifact_dir: Path) -> Path:
+    arrays = load_competition_arrays(xfdata_root)
+    path = artifact_dir / "prepared_data.npz"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    np.savez_compressed(
+        path,
+        **arrays,
     )
     return path
 
@@ -207,6 +234,7 @@ def fft_highpass(x: np.ndarray) -> np.ndarray:
 
 
 def first_derivative(x: np.ndarray, window: int) -> np.ndarray:
+    # 二阶Savitzky-Golay多项式用于估计一阶导数；窗口长度来自ALL_PAIRS候选。
     return np.asarray(
         [savgol_filter(row, window_length=window, polyorder=2, deriv=1) for row in x]
     )
@@ -261,6 +289,7 @@ def local_mean(x: np.ndarray, radius: int) -> np.ndarray:
 
 
 def make_gpr(kernel_name: str) -> GaussianProcessRegressor:
+    # 1.0、10.0等数值只是优化器初始值；sklearn会使用训练数据优化允许变化的核参数。
     if kernel_name == "rbf":
         kernel = ConstantKernel(1.0) * RBF(10.0) + WhiteKernel(1.0)
     elif kernel_name == "matern15":
@@ -289,10 +318,12 @@ def fit_oof_kernel(
     x: np.ndarray, y: np.ndarray, groups: np.ndarray, kernel_name: str, radius: int
 ) -> np.ndarray:
     result = np.full(len(y), np.nan, dtype=np.float64)
+    # 固定5折生成基础模型OOF；每个批次均值只占一行，批次不会跨折。
     splitter = GroupKFold(5)
     for train_rows, valid_rows in splitter.split(x, y, groups):
         np.random.seed(SEED)
         mask = select_vip_mask(x[train_rows], y[train_rows])
+        # 少于5个VIP通道时回退为全通道，避免GPR特征空间退化。
         if int(mask.sum()) < 5:
             mask = np.ones(x.shape[1], dtype=bool)
         train_features = augment(x[train_rows], mask, radius)
@@ -315,7 +346,44 @@ def fit_test_kernel(
     kernel_name: str,
     radius: int,
 ) -> np.ndarray:
-    def fit_once(mask: np.ndarray) -> np.ndarray:
+    prediction, _, _ = fit_test_kernel_with_state(
+        x_train, y, x_test, kernel_name, radius
+    )
+    return prediction
+
+
+def full_training_masks(x_train: np.ndarray, y: np.ndarray) -> list[np.ndarray]:
+    """Create the deterministic VIP mask ensemble used by the frozen model."""
+    np.random.seed(SEED)
+    base_mask = select_vip_mask(x_train, y)
+    if int(base_mask.sum()) < 5:
+        base_mask = np.ones(x_train.shape[1], dtype=bool)
+    masks = [base_mask]
+    for aggregate in range(1, MASK_AGGREGATES):
+        generator = np.random.RandomState(SEED + 1000 + aggregate)
+        mask = base_mask.copy()
+        selected = np.flatnonzero(mask)
+        mask[selected[generator.rand(len(selected)) < 0.05]] = False
+        available = np.flatnonzero(~mask)
+        extra_count = min(int(0.02 * len(mask)), len(available))
+        if extra_count:
+            mask[generator.choice(available, size=extra_count, replace=False)] = True
+        masks.append(mask)
+    return masks
+
+
+def fit_test_kernel_with_state(
+    x_train: np.ndarray,
+    y: np.ndarray,
+    x_test: np.ndarray,
+    kernel_name: str,
+    radius: int,
+) -> tuple[np.ndarray, list[np.ndarray], list[np.ndarray]]:
+    """Fit one full-data branch and return its optimized kernel parameters."""
+    masks = full_training_masks(x_train, y)
+    predictions: list[np.ndarray] = []
+    kernel_thetas: list[np.ndarray] = []
+    for mask in masks:
         train_features = augment(x_train, mask, radius)
         test_features = augment(x_test, mask, radius)
         scaler = StandardScaler()
@@ -324,71 +392,42 @@ def fit_test_kernel(
         np.random.seed(SEED)
         model = make_gpr(kernel_name)
         model.fit(train_scaled, y)
-        return model.predict(test_scaled)
-
-    np.random.seed(SEED)
-    base_mask = select_vip_mask(x_train, y)
-    if int(base_mask.sum()) < 5:
-        base_mask = np.ones(x_train.shape[1], dtype=bool)
-    prediction = fit_once(base_mask)
-    for aggregate in range(1, MASK_AGGREGATES):
-        generator = np.random.RandomState(SEED + 1000 + aggregate)
-        mask = base_mask.copy()
-        selected = np.flatnonzero(mask)
-        mask[selected[generator.rand(len(selected)) < 0.05]] = False
-        available = np.flatnonzero(~mask)
-        extra_count = int(0.02 * len(mask))
-        mask[generator.choice(available, size=extra_count, replace=False)] = True
-        prediction += fit_once(mask)
-    return prediction / MASK_AGGREGATES
+        predictions.append(model.predict(test_scaled))
+        kernel_thetas.append(np.asarray(model.kernel_.theta, dtype=np.float64))
+    return np.mean(predictions, axis=0), masks, kernel_thetas
 
 
-def _train_base_models_single_thread(prepared_path: Path, model_dir: Path) -> Path:
-    started = time.perf_counter()
-    with np.load(prepared_path, allow_pickle=False) as data:
-        x_train_raw = data["x_train"]
-        x_test_raw = data["x_test"]
-        y = data["y"]
-        groups = data["train_ids"].astype(str)
-    arrays: dict[str, np.ndarray] = {}
-    for pair_index, (window, radius) in enumerate(FIXED_PAIRS, start=1):
-        pair_started = time.perf_counter()
-        x_train = preprocess(x_train_raw, window)
-        x_test = preprocess(x_test_raw, window)
-        oof_kernels = []
-        test_kernels = []
-        for kernel_index, kernel_name in enumerate(KERNEL_NAMES, start=1):
-            print(
-                f"[base] pair={pair_index}/{len(FIXED_PAIRS)} "
-                f"kernel={kernel_index}/{len(KERNEL_NAMES)} {kernel_name}",
-                flush=True,
-            )
-            oof_kernels.append(fit_oof_kernel(x_train, y, groups, kernel_name, radius))
-            test_kernels.append(
-                fit_test_kernel(x_train, y, x_test, kernel_name, radius)
-            )
-        arrays[f"oof_{window}_{radius}"] = np.column_stack(oof_kernels) @ KERNEL_WEIGHTS
-        arrays[f"test_{window}_{radius}"] = np.column_stack(test_kernels) @ KERNEL_WEIGHTS
-        print(
-            f"[base] pair=({window},{radius}) seconds={time.perf_counter() - pair_started:.1f}",
-            flush=True,
+def predict_test_kernel_from_state(
+    x_train: np.ndarray,
+    y: np.ndarray,
+    x_test: np.ndarray,
+    kernel_name: str,
+    radius: int,
+    masks: list[np.ndarray],
+    kernel_thetas: list[np.ndarray],
+) -> np.ndarray:
+    """Reconstruct a fitted GPR branch without optimizing any hyperparameter."""
+    if len(masks) != MASK_AGGREGATES or len(kernel_thetas) != MASK_AGGREGATES:
+        raise ValueError("Frozen GPR state has an unexpected aggregate count")
+    predictions: list[np.ndarray] = []
+    for mask, theta in zip(masks, kernel_thetas):
+        train_features = augment(x_train, np.asarray(mask, bool), radius)
+        test_features = augment(x_test, np.asarray(mask, bool), radius)
+        scaler = StandardScaler()
+        train_scaled = scaler.fit_transform(train_features)
+        test_scaled = scaler.transform(test_features)
+        fitted_kernel = make_gpr(kernel_name).kernel.clone_with_theta(
+            np.asarray(theta, dtype=float)
         )
-    arrays["raw_oof"] = np.column_stack(
-        [arrays[f"oof_{window}_{radius}"] for window, radius in FIXED_PAIRS]
-    ) @ PAIR_WEIGHTS
-    arrays["raw_test"] = np.column_stack(
-        [arrays[f"test_{window}_{radius}"] for window, radius in FIXED_PAIRS]
-    ) @ PAIR_WEIGHTS
-    path = model_dir / "base_component_predictions.npz"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    np.savez_compressed(path, **arrays)
-    print(f"[base] seconds={time.perf_counter() - started:.1f}", flush=True)
-    return path
-
-
-def train_base_models(prepared_path: Path, model_dir: Path) -> Path:
-    with threadpool_limits(limits=1):
-        return _train_base_models_single_thread(prepared_path, model_dir)
+        model = GaussianProcessRegressor(
+            kernel=fitted_kernel,
+            optimizer=None,
+            normalize_y=True,
+            random_state=SEED,
+        )
+        model.fit(train_scaled, y)
+        predictions.append(model.predict(test_scaled))
+    return np.mean(predictions, axis=0)
 
 
 def c_mad3_mask(
@@ -404,6 +443,7 @@ def c_mad3_mask(
     absolute = np.asarray([abs(value) for _, value in residuals], dtype=float)
     median = float(np.median(absolute))
     scaled_mad = float(1.4826 * np.median(np.abs(absolute - median)))
+    # C_mad3定义：绝对校准残差中位数加3倍稳健MAD作为训练异常阈值。
     cutoff = median + 3.0 * scaled_mad
     excluded = np.zeros(len(y), dtype=bool)
     for row, residual in residuals:
@@ -413,6 +453,7 @@ def c_mad3_mask(
 
 
 def jackknife_line(x: np.ndarray, y: np.ndarray) -> tuple[float, float]:
+    # 少于4个样本无法稳定执行留一法，因此回退为普通一次线性拟合。
     if len(x) < 4:
         slope, intercept = np.polyfit(x, y, 1)
         return float(slope), float(intercept)
@@ -433,6 +474,7 @@ def fit_calibration(
     parameters: dict[str, tuple[float, float]] = {}
     for coal_type in np.unique(coal_types):
         mask = (coal_types == coal_type) & ~excluded
+        # 剔除异常后少于3个样本时恢复使用该煤种全部训练样本，避免无法拟合直线。
         if int(mask.sum()) < 3:
             mask = coal_types == coal_type
         parameters[str(coal_type)] = jackknife_line(prediction[mask], y[mask])
@@ -504,6 +546,7 @@ def continuum_residual(
 def emission_bands(
     spectra: np.ndarray, wavelengths: np.ndarray, points: int = 64
 ) -> list[np.ndarray]:
+    # 每个局部波段统一插值为64点，保证不同原始波长网格下特征维度一致。
     normalized = snv(spectra)
     target = np.linspace(0.0, 1.0, points)
     output = []
@@ -517,6 +560,7 @@ def emission_bands(
 
 
 def pool_signed_rms(values: np.ndarray, bins: int = 4) -> np.ndarray:
+    # 每个Haar尺度固定汇总为4个局部区块，并保留有符号均值与RMS能量。
     blocks = []
     for indices in np.array_split(np.arange(values.shape[1]), bins):
         part = values[:, indices]
@@ -527,6 +571,7 @@ def pool_signed_rms(values: np.ndarray, bins: int = 4) -> np.ndarray:
 
 
 def haar_features(band: np.ndarray, levels: int = 4) -> np.ndarray:
+    # 使用4个Haar尺度覆盖由局部到较宽的波段变化。
     scaling = np.asarray(band, float)
     output = []
     for level in range(1, levels + 1):
@@ -548,6 +593,7 @@ def geometry_scores(
     target = np.linspace(float(wavelengths.min()), float(wavelengths.max()), RAW_POINTS)
     train = np.vstack([np.interp(target, wavelengths, row) for row in x_train_raw]).astype(np.float32)
     test = np.vstack([np.interp(target, wavelengths, row) for row in x_test_raw]).astype(np.float32)
+    # 两个预先声明的LVSE视图：粗视图16段×2模态，细视图32段×4模态。
     coarse_train, coarse_test = transform_lvse(train, test, 16, 2)
     fine_train, fine_test = transform_lvse(train, test, 32, 4)
     train_wavelet = np.column_stack([haar_features(band) for band in emission_bands(train, target)])
@@ -557,129 +603,10 @@ def geometry_scores(
     scaler = StandardScaler()
     train_scaled = scaler.fit_transform(train_features)
     test_scaled = scaler.transform(test_features)
+    # 先计算最多10维几何坐标；最终使用前几维由训练折外验证另行选择。
     components = min(10, len(train_features) - 1, train_features.shape[1])
     pca = PCA(n_components=components, svd_solver="full")
     train_scores = pca.fit_transform(train_scaled)
     test_scores = pca.transform(test_scaled)
     score_scale = np.maximum(np.std(train_scores, axis=0, ddof=1), 1.0e-12)
     return train_scores / score_scale, test_scores / score_scale
-
-
-def train_final_model(
-    project_root: Path,
-    package_root: Path,
-    prepared_path: Path,
-    base_path: Path,
-) -> tuple[Path, Path]:
-    started = time.perf_counter()
-    with np.load(prepared_path, allow_pickle=False) as data:
-        prepared = {key: np.asarray(data[key]) for key in data.files}
-    with np.load(base_path, allow_pickle=False) as base:
-        raw_oof = np.asarray(base["raw_oof"], float)
-        raw_test = np.asarray(base["raw_test"], float)
-    y = prepared["y"].astype(float)
-    coal_train = prepared["coal_train"].astype(str)
-    coal_test = prepared["coal_test"].astype(str)
-    excluded, cutoff = c_mad3_mask(raw_oof, y, coal_train)
-    parameters = fit_calibration(raw_oof, y, coal_train, excluded)
-    raw_train = apply_calibration(raw_oof, coal_train, parameters)
-    raw_query = apply_calibration(raw_test, coal_test, parameters)
-    train_scores, test_scores = geometry_scores(
-        prepared["x_train"], prepared["x_test"], prepared["wavelengths"]
-    )
-
-    sample_path = project_root / "data" / "submit_sample" / "submit" / "submit.csv"
-    sample = pd.read_csv(sample_path, encoding="utf-8-sig")
-    sample_ids = sample.iloc[:, 0].astype(str).to_numpy()
-    test_ids = prepared["test_ids"].astype(str)
-    position = {batch_id: row for row, batch_id in enumerate(test_ids)}
-    if set(position) != set(sample_ids):
-        raise ValueError("Test batches do not match the submission template")
-    order = np.asarray([position[batch_id] for batch_id in sample_ids], dtype=int)
-
-    arrays: dict[str, np.ndarray] = {
-        "batch_ids": np.asarray(sample_ids, dtype=str),
-        "coal_train": np.asarray(coal_train, dtype=str),
-        "coal_test": np.asarray(coal_test[order], dtype=str),
-        "raw_test_calibrated": raw_query[order],
-        "geometry_train_scores": train_scores,
-        "geometry_test_scores": test_scores[order],
-        "training_residuals": y - raw_train,
-    }
-    arrays["expected_prediction"] = predict_from_arrays(arrays)
-    model_path = package_root / "model" / "model_weights.npz"
-    np.savez_compressed(model_path, **arrays)
-    submission_path = package_root / "submit.csv"
-    pd.DataFrame(
-        {
-            sample.columns[0]: sample_ids,
-            PREDICTION_COLUMN: arrays["expected_prediction"],
-        }
-    ).to_csv(
-        submission_path,
-        index=False,
-        encoding="utf-8",
-        float_format="%.10f",
-        lineterminator="\n",
-    )
-    report = {
-        "method": "fixed_multikernel_gpr_with_mean_preserving_residual_correction",
-        "training_rows": int(len(y)),
-        "test_rows": int(len(test_ids)),
-        "fixed_pairs": [list(pair) for pair in FIXED_PAIRS],
-        "pair_weights": PAIR_WEIGHTS.tolist(),
-        "kernel_names": list(KERNEL_NAMES),
-        "kernel_weights": KERNEL_WEIGHTS.tolist(),
-        "group_folds": 5,
-        "c_mad3_cutoff": float(cutoff),
-        "excluded_training_rows": np.flatnonzero(excluded).astype(int).tolist(),
-        "calibration_parameters": {key: list(value) for key, value in parameters.items()},
-        "raw_oof_rmse": float(np.sqrt(np.mean((raw_oof - y) ** 2))),
-        "calibrated_oof_rmse": float(np.sqrt(np.mean((raw_train - y) ** 2))),
-        "prediction_min": float(arrays["expected_prediction"].min()),
-        "prediction_max": float(arrays["expected_prediction"].max()),
-        "prepared_data_sha256": file_sha256(prepared_path),
-        "base_predictions_sha256": file_sha256(base_path),
-        "weights_sha256": file_sha256(model_path),
-        "submission_sha256": file_sha256(submission_path),
-        "seconds": float(time.perf_counter() - started),
-    }
-    (package_root / "model" / "model_config.json").write_text(
-        json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8"
-    )
-    print(
-        f"[final] oof_rmse={report['calibrated_oof_rmse']:.6f}, "
-        f"excluded={report['excluded_training_rows']}, seconds={report['seconds']:.1f}",
-        flush=True,
-    )
-    return model_path, submission_path
-
-
-def main() -> None:
-    if hasattr(sys.stdout, "reconfigure"):
-        sys.stdout.reconfigure(line_buffering=True, encoding="utf-8")
-    package_root = Path(__file__).resolve().parents[1]
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--project-root", type=Path, required=True)
-    parser.add_argument("--stage", choices=("data", "base", "final", "all"), default="all")
-    parser.add_argument("--artifact-dir", type=Path, default=package_root / "training_artifacts")
-    args = parser.parse_args()
-    project_root = args.project_root.resolve()
-    artifact_dir = args.artifact_dir.resolve()
-    prepared_path = artifact_dir / "prepared_data.npz"
-    base_path = package_root / "model" / "base_component_predictions.npz"
-
-    if args.stage in {"data", "all"}:
-        prepared_path = prepare_data(project_root, artifact_dir)
-    if args.stage in {"base", "all"}:
-        if not prepared_path.exists():
-            raise FileNotFoundError("Run the data stage first")
-        base_path = train_base_models(prepared_path, package_root / "model")
-    if args.stage in {"final", "all"}:
-        if not prepared_path.exists() or not base_path.exists():
-            raise FileNotFoundError("Run the data and base stages first")
-        train_final_model(project_root, package_root, prepared_path, base_path)
-
-
-if __name__ == "__main__":
-    main()

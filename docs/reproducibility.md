@@ -1,69 +1,92 @@
-# 复现指南
+# 官方审核格式复现指南
 
-## 环境
+## 运行环境
 
-原始验证环境为 Windows 与 Python 3.8：
+已验证环境：
 
 ```text
-E:\anaconda3\envs\pytorch\python.exe
+Windows 10 10.0.26200
+Python 3.8.19
+CPU 推理，无需 CUDA、CuDNN、PyTorch 或编译扩展
 ```
 
-安装依赖：
+安装固定版本依赖：
+
+```bash
+python3 -m pip install -r requirements.txt
+```
+
+## 数据放置
+
+将赛事数据放入根目录的 `xfdata/`。程序兼容两种形式：数据目录直接位于 `xfdata/`，或者位于 `xfdata/` 下唯一一层数据集目录中。
+
+```text
+xfdata/
+├─ 训练集/
+├─ 训练集标签/
+├─ 测试集/
+└─ submit_sample/
+   └─ .../submit.csv
+```
+
+## 固化模型推理
+
+Linux 或 Git Bash：
+
+```bash
+bash test.sh
+```
+
+如果 Python 命令不是 `python3`：
+
+```bash
+PYTHON_BIN=python bash test.sh
+```
+
+Windows PowerShell 可直接运行：
 
 ```powershell
-python -m pip install -r requirements.txt
+E:\anaconda3\envs\pytorch\python.exe code\predict.py `
+  --xfdata-root xfdata `
+  --weights user_data\model_data\model_weights.npz `
+  --output prediction_result\result
 ```
 
-如需尽量复现本次验证环境，可改用：
+推理会从原始训练和测试光谱重建批次特征，在冻结的 VIP 掩码、核参数、融合权重和校准参数下重建 GPR 状态，最终生成 `prediction_result/result`。
 
-```powershell
-python -m pip install -r requirements-lock.txt
+## 完整训练
+
+```bash
+bash train.sh
 ```
 
-## 从原始数据训练
+训练依次完成：
 
-将官方数据按 `data/README.md` 中的结构放到仓库根目录，然后运行：
+1. 读取 70 个训练批次和 26 个测试批次并生成批次均值光谱；
+2. 对 7 个尺度和 5 类核生成 35 个基础分支及训练折外预测；
+3. 使用训练集内层验证选择正则强度并学习非负融合权重；
+4. 执行 C_mad3 煤种内稳健校准；
+5. 从训练环境验证选择几何维数和残差修正比例；
+6. 写入 `user_data/model_data/` 并生成 `prediction_result/result`。
 
-```powershell
-python src/train_full.py --project-root . --stage all
+训练中间文件写入 `user_data/tmp_data/`，不进入 Git 版本控制。
+
+## 完整性检查
+
+```bash
+python3 code/verify_package.py --xfdata-root xfdata
 ```
 
-程序将依次：
+检查内容包括官方目录结构、UTF-8 编码、两列字段、有限预测值、测试标识顺序，以及固化权重中是否出现测试专用预测数组。
 
-1. 读取训练和测试批次，生成批次平均光谱；
-2. 训练三组多尺度、五核 GPR，并生成五折 OOF；
-3. 融合基础预测并拟合 C_mad3 煤种校准；
-4. 提取 LVSE、Haar 和 PCA 几何表示；
-5. 从训练 OOF 残差生成可靠性门控修正；
-6. 写出固化权重、配置和两列提交文件。
+当前参考结果包含 26 行，SHA-256 为：
 
-也可以分阶段运行：
-
-```powershell
-python src/train_full.py --project-root . --stage data
-python src/train_full.py --project-root . --stage base
-python src/train_full.py --project-root . --stage final
+```text
+903637a78e67f5aee3b82fb443a7d6d24e5524f4453fbafa61c018e1ba8a04f8
 ```
-
-## 使用固化模型生成提交
-
-```powershell
-python src/predict.py --weights model/model_weights.npz --output submit.csv
-```
-
-注意：固化权重保存了本次比赛测试批次的低维表示和基础模型输出，因此这个命令用于准确重建历史提交。对新的原始光谱推理时，应重新执行完整训练流程中的数据、基础模型和最终阶段。
-
-## 校验
-
-```powershell
-python src/verify_package.py --package-root .
-```
-
-校验内容包括 UTF-8 编码、两列字段、批次唯一性、有限数值、行顺序以及预测结果与固化权重的一致性。
 
 ## 确定性边界
 
-- 随机掩码通过固定种子控制。
-- GPR 和 SVD 仍可能受到 NumPy、SciPy、scikit-learn、BLAS 实现和线程数差异影响。
-- 原环境从零复跑与冻结提交的最大差异约为 `0.00005`，属于浮点舍入量级。
-- 官方隐藏测试标签不可用，因此只能复现预测文件，不能在本地重算官方 RMSE。
+- 随机种子、候选集合、数据划分与线程限制均固定在源码中。
+- NumPy、SciPy、scikit-learn 或底层 BLAS 实现不同，仍可能产生浮点舍入量级差异。
+- 官方隐藏标签不可用，因此本地只能验证训练、推理和预测文件一致性，不能重新计算平台 RMSE。

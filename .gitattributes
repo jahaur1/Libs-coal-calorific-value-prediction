@@ -1,6 +1,12 @@
 * text=auto
+.gitattributes text eol=lf
+.gitignore text eol=lf
+CHECKSUMS.sha256 text eol=lf
 *.py text eol=lf
 *.md text eol=lf
 *.csv text eol=lf
 *.json text eol=lf
+*.sh text eol=lf
+*.txt text eol=lf
+prediction_result/result text eol=lf
 *.npz binary

@@ -1,7 +1,8 @@
-# Competition data and data-derived caches
-data/*
-!data/README.md
-training_artifacts/
+# Organizer-provided data and generated training caches
+xfdata/*
+!xfdata/.gitkeep
+user_data/tmp_data/*
+!user_data/tmp_data/.gitkeep
 
 # Local experiments and diagnostic targets
 experiments/
