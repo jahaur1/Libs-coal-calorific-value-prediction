@@ -46,7 +46,7 @@ PYTHON_BIN=python bash test.sh
 Windows PowerShell 可直接运行：
 
 ```powershell
-E:\anaconda3\envs\pytorch\python.exe code\predict.py `
+& "C:\path\to\python.exe" code\predict.py `
   --xfdata-root xfdata `
   --weights user_data\model_data\model_weights.npz `
   --output prediction_result\result
