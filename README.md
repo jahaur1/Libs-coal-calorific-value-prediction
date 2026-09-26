@@ -1,6 +1,6 @@
 # Field LIBS Coal Calorific Value Prediction
 
-基于现场 LIBS 光谱的煤炭弹筒发热量预测方案，记录完整建模过程、官方审核格式代码、固化模型以及比赛平台返回成绩。赛事成绩现已公布，本项目最终官方 RMSE 记录为 **140.71316**。仓库当前只保留经过独立运行验证的官方审核格式数据驱动版本，比赛期间的方案以成绩记录形式保留。
+基于现场 LIBS 光谱的煤炭弹筒发热量预测方案，记录完整的数据驱动训练与推理流程、固化模型以及比赛平台返回成绩。赛事成绩现已公布，本项目最终官方 RMSE 记录为 **140.71316**。
 
 ## 最终比赛结果
 
@@ -90,14 +90,6 @@
 7. **几何残差门控**：通过 LVSE、Haar 和 PCA 构造距离空间，根据测试批次的训练支撑度控制残差修正强度。
 8. **煤种内均值守恒**：各煤种的残差修正均值保持为零，防止二阶段模型破坏基础预测的整体校准。
 
-**技术说明**
-
-- 候选尺度、核族、正则候选和随机种子在源码顶部统一声明；最终融合权重、GPR 核参数、几何维数和修正比例由训练流程产生。
-- `user_data/model_data/model_weights.npz` 采用模型格式 v2，保存训练批次快照、波长轴、VIP 掩码、核参数、融合权重、校准参数和训练残差。
-- `test.sh` 会从 `xfdata/` 中重新读取原始训练/测试光谱，在冻结参数下重建 GPR 状态并生成结果，不依赖预计算测试预测。
-- 根目录审核版本的参考预测 SHA-256 为 `903637a78e67f5aee3b82fb443a7d6d24e5524f4453fbafa61c018e1ba8a04f8`。
-- 最终官方 RMSE `140.71316` 作为比赛结果记录保留；仓库根目录的代码、权重和参考结果统一对应当前官方审核格式版本。
-
 ## 成绩演进
 
 | 版本 | 官方 RMSE | 说明 |
@@ -106,7 +98,6 @@
 | C_mad3 稳健多核校准 | 143.81585 | 引入稳健筛选与多核融合 |
 | 多视图残差共识候选 | 141.41519 | 未超过最终计分方案 |
 | 最终官方成绩方案 | **140.71316** | 赛事最终成绩记录 |
-| 当前官方审核格式数据驱动版本 | 未记录 | 仓库现行代码、权重与参考结果 |
 
 最终结果摘要见 [final_result.md](docs/final_result.md)，完整建模演进见 [modeling_journey.md](docs/modeling_journey.md)，结构化官方成绩见 [official_scores.csv](docs/official_scores.csv)。
 
@@ -132,9 +123,7 @@
 ├─ train.sh
 ├─ test.sh
 ├─ docs/                           # 建模与复现记录
-├─ LICENSE.md
-├─ COMMERCIAL_LICENSE.md
-└─ NOTICE.md
+└─ LICENSE.md
 ```
 
 ## 运行方法
@@ -167,9 +156,4 @@ Windows 下可通过 `PYTHON_BIN` 指定 Python；完整说明见 [reproducibili
 
 ## 许可协议
 
-本项目采用双重许可：
-
-- **非商业使用**：遵循 [PolyForm Noncommercial License 1.0.0](LICENSE.md)。
-- **商业使用**：必须事先取得版权人的书面许可、签署独立商业许可协议并支付约定费用，具体条件见 [COMMERCIAL_LICENSE.md](COMMERCIAL_LICENSE.md)。
-
-在书面商业许可协议签署且约定费用支付完成前，不授予任何商业使用权。版权人署名和商业授权联系邮箱暂时留空，预留位置见 [NOTICE.md](NOTICE.md)。
+本项目遵循 [PolyForm Noncommercial License 1.0.0](LICENSE.md)。
