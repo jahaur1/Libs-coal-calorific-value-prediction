@@ -22,16 +22,11 @@ from predict import PREDICTION_COLUMN, predict_from_arrays
 
 warnings.filterwarnings("ignore")
 
-# 预先声明的多尺度候选集合；这里只规定训练要比较的搜索范围，
-# 最终尺度贡献由训练集折外预测学习出的非负融合权重决定。
+# 模型搜索空间与复现随机种子。
 ALL_PAIRS = ((5, 2), (7, 3), (9, 4), (11, 5), (13, 6), (15, 7), (17, 8))
-# 融合权重的L2正则候选集合；每一层的最终正则强度由训练集内层验证选择。
 WEIGHT_PENALTIES = np.asarray((0.0, 1.0e-4, 1.0e-3, 1.0e-2, 1.0e-1), float)
-# 残差几何表示维数候选；最终值由训练环境的折外RMSE和最差折RMSE共同选择。
 GEOMETRY_CANDIDATES = (3, 5, 7, 10)
-# 残差修正比例候选；0.0同时作为“不启用残差修正”的训练基线。
 CORRECTION_CANDIDATES = (0.0, 0.35, 0.70, 1.0)
-# 只用于固定训练集划分和随机过程，保证同一环境下可复现，不承载目标信息。
 SELECTION_SEED = 20260827
 
 
@@ -131,7 +126,7 @@ def fit_convex_weights(
         method="SLSQP",
         bounds=[(0.0, 1.0)] * count,
         constraints={"type": "eq", "fun": lambda weights: float(weights.sum() - 1.0)},
-        # 固定数值精度和迭代上限仅控制优化器收敛，不是模型预测参数。
+        # 优化器收敛设置。
         options={"ftol": 1.0e-12, "maxiter": 1000},
     )
     if not result.success:
@@ -281,7 +276,7 @@ def fit_minimax_environment_weights(
         method="SLSQP",
         bounds=[(0.0, 1.0)] * count + [(0.0, None)],
         constraints=constraints,
-        # Minimax问题约束较多，使用更高迭代上限保证数值收敛。
+        # Minimax约束较多，允许更多迭代。
         options={"ftol": 1.0e-12, "maxiter": 3000},
     )
     if not result.success:
@@ -571,8 +566,7 @@ def write_final_candidate(
     positions = {batch_id: row for row, batch_id in enumerate(test_ids)}
     order = np.asarray([positions[batch_id] for batch_id in sample_ids], dtype=int)
     calibration_types = np.asarray(sorted(calibration), dtype=str)
-    # 固化训练所得参数，不保存测试批次ID、测试特征或测试预测。
-    # test.sh会从xfdata重新读取测试光谱并用这些参数执行推理。
+    # 仅固化训练参数；推理时从xfdata重建测试预测。
     arrays: dict[str, np.ndarray] = {
         "model_format_version": np.asarray(2, dtype=np.int32),
         "train_ids": np.asarray(data["train_ids"], dtype=str),
@@ -698,7 +692,7 @@ def main() -> None:
     parser.add_argument(
         "--weight-estimator",
         choices=("stratified_bagged", "environment_bagged", "environment_minimax"),
-        # 预先声明的默认训练协议；它决定如何构造外层折，不直接指定最终融合权重。
+        # 默认外层折构造策略。
         default="stratified_bagged",
     )
     args = parser.parse_args()

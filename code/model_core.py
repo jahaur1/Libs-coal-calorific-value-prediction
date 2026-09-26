@@ -27,24 +27,16 @@ from sklearn.preprocessing import StandardScaler
 warnings.filterwarnings("ignore")
 
 
-# 以下常量是预先声明的算法与复现设置，不是最终预测值或测试目标信息。
-# 固定随机过程，使VIP扰动集成和GPR训练在相同运行环境中可复现。
+# 光谱预处理、VIP/GPR与残差几何配置。
 SEED = 0
-# FFT高通滤波移除最低2%的频率分量，用于削弱缓慢变化的光谱基线。
 FFT_CUTOFF = 0.02
-# VIP=1是PLS变量重要性筛选的标准阈值；具体保留通道仍由训练标签决定。
 VIP_THRESHOLD = 1.0
-# PLS最多使用20个分量计算VIP，实际分量数还受训练样本数限制。
 VIP_COMPONENTS = 20
-# 每个GPR核执行2次额外优化器重启，以降低局部最优风险。
 GPR_RESTARTS = 2
-# 全训练拟合时对VIP掩码做5次确定性扰动并平均，降低单次通道选择方差。
 MASK_AGGREGATES = 5
-# 几何残差分支将原始波长轴统一重采样到512点。
 RAW_POINTS = 512
-# 预先声明的基础核族；核超参数仍由每次GPR训练在训练数据上优化。
 KERNEL_NAMES = ("rbf", "matern15", "matern25", "rational_quadratic", "dot_product")
-# 竞赛训练标签工作簿的固定列顺序，用于把无标题字段映射为语义列名。
+# 无标题标签表的列映射。
 LABEL_COLUMNS = (
     "batch_day",
     "total_moisture",
@@ -54,8 +46,7 @@ LABEL_COLUMNS = (
     "hydrogen",
     "sulfur",
 )
-# 基于光谱领域知识预先声明的四个发射波段：
-# 每项依次为中心区间、左连续谱区间和右连续谱区间，不使用测试目标确定。
+# 四个发射波段，每项依次为中心区间、左连续谱区间和右连续谱区间。
 EMISSION_BANDS = (
     (306.0, 310.0, 302.0, 305.0, 311.0, 314.0),
     (484.0, 488.0, 480.0, 483.0, 489.0, 492.0),
@@ -289,7 +280,7 @@ def local_mean(x: np.ndarray, radius: int) -> np.ndarray:
 
 
 def make_gpr(kernel_name: str) -> GaussianProcessRegressor:
-    # 1.0、10.0等数值只是优化器初始值；sklearn会使用训练数据优化允许变化的核参数。
+    # 统一的核参数初始值。
     if kernel_name == "rbf":
         kernel = ConstantKernel(1.0) * RBF(10.0) + WhiteKernel(1.0)
     elif kernel_name == "matern15":
@@ -603,7 +594,7 @@ def geometry_scores(
     scaler = StandardScaler()
     train_scaled = scaler.fit_transform(train_features)
     test_scaled = scaler.transform(test_features)
-    # 先计算最多10维几何坐标；最终使用前几维由训练折外验证另行选择。
+    # 几何坐标最多保留10维。
     components = min(10, len(train_features) - 1, train_features.shape[1])
     pca = PCA(n_components=components, svd_solver="full")
     train_scores = pca.fit_transform(train_scaled)
