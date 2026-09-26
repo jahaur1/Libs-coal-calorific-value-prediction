@@ -2,4 +2,5 @@ model_stage,official_rmse,selected,result_status,source
 GPR+FFT+SG1+MSC+coal calibration,174.41325,false,historical_submission,competition platform
 C_mad3 robust multikernel calibration,143.81585,false,historical_submission,competition platform
 multiview residual consensus candidate,141.41519,false,historical_submission,competition platform
-multiscale multikernel GPR with reliability-gated residual correction,140.71316,true,final_official_result,competition platform
+multiscale multikernel GPR with reliability-gated residual correction,140.71316,false,historical_submission,competition platform
+Jahaur final leaderboard result,140.36392,true,final_leaderboard_result,competition platform
